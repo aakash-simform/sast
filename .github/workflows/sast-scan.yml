@@ -1,0 +1,270 @@
+name: SAST Security Scan
+
+on:
+  pull_request:
+    branches:
+      - develop
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  trivy-scan:
+    name: Trivy Security Scanner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Trivy vulnerability scanner in fs mode
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Trivy scan for PR comment
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          output: 'trivy-report.txt'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+
+      - name: Comment Trivy results on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            let trivyReport = '';
+            
+            try {
+              trivyReport = fs.readFileSync('trivy-report.txt', 'utf8');
+            } catch (error) {
+              trivyReport = 'No vulnerabilities detected or scan failed.';
+            }
+
+            const output = `### 🔍 Trivy Security Scan Results
+            
+            <details>
+            <summary>Click to view detailed Trivy scan results</summary>
+            
+            \`\`\`
+            ${trivyReport}
+            \`\`\`
+            
+            </details>
+            
+            ${trivyReport.includes('Total: 0') || trivyReport.includes('No vulnerabilities') ? '✅ No vulnerabilities found!' : '⚠️ Please review and address the vulnerabilities above.'}
+            `;
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('🔍 Trivy Security Scan Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: output
+              });
+            }
+
+  gitleaks-scan:
+    name: Gitleaks Secret Scanner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        id: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+        continue-on-error: true
+
+      - name: Get Gitleaks results
+        if: always()
+        id: gitleaks-results
+        run: |
+          if [ -f gitleaks-report.json ]; then
+            echo "report_exists=true" >> $GITHUB_OUTPUT
+            echo "Report file found"
+          else
+            echo "report_exists=false" >> $GITHUB_OUTPUT
+            echo "No report file found"
+          fi
+
+      - name: Comment Gitleaks results on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            let gitleaksReport = '';
+            let hasLeaks = false;
+            let leakCount = 0;
+
+            try {
+              const reportContent = fs.readFileSync('gitleaks-report.json', 'utf8');
+              const report = JSON.parse(reportContent);
+              leakCount = report.length || 0;
+              hasLeaks = leakCount > 0;
+              
+              if (hasLeaks) {
+                gitleaksReport = report.map((leak, index) => {
+                  return `**Finding ${index + 1}:**
+            - **File:** ${leak.File}
+            - **Line:** ${leak.StartLine}
+            - **Rule:** ${leak.RuleID}
+            - **Description:** ${leak.Description || 'Secret detected'}
+            - **Match:** \`${leak.Match ? leak.Match.substring(0, 50) + '...' : 'N/A'}\`
+            `;
+                }).join('\n');
+              }
+            } catch (error) {
+              console.log('No gitleaks report found or error reading it:', error.message);
+            }
+
+            const output = `### 🔐 Gitleaks Secret Scan Results
+            
+            ${hasLeaks ? 
+              `⚠️ **${leakCount} potential secret(s) detected!**
+              
+              <details>
+              <summary>Click to view detailed Gitleaks findings</summary>
+              
+              ${gitleaksReport}
+              
+              </details>
+              
+              **Action Required:** Please review and remove any exposed secrets. Consider using environment variables or secret management services.` 
+              : 
+              '✅ No secrets or credentials detected in the code!'
+            }
+            `;
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('🔐 Gitleaks Secret Scan Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: output
+              });
+            }
+
+  scan-summary:
+    name: Security Scan Summary
+    runs-on: ubuntu-latest
+    needs: [trivy-scan, gitleaks-scan]
+    if: always()
+    steps:
+      - name: Post summary comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const trivyStatus = '${{ needs.trivy-scan.result }}';
+            const gitleaksStatus = '${{ needs.gitleaks-scan.result }}';
+            
+            const statusEmoji = (status) => {
+              if (status === 'success') return '✅';
+              if (status === 'failure') return '❌';
+              return '⚠️';
+            };
+
+            const output = `### 📊 Security Scan Summary
+            
+            | Scanner | Status |
+            |---------|--------|
+            | Trivy (Vulnerabilities) | ${statusEmoji(trivyStatus)} ${trivyStatus} |
+            | Gitleaks (Secrets) | ${statusEmoji(gitleaksStatus)} ${gitleaksStatus} |
+            
+            ---
+            
+            Please review the detailed scan results above and address any security findings before merging.
+            `;
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('📊 Security Scan Summary')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: output
+              });
+            }
