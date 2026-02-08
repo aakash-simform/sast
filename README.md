@@ -43,11 +43,6 @@ When you create a pull request targeting the `develop` branch, the following sec
 - Keep dependencies up to date
 - Review security scan results carefully
 - Address high and critical vulnerabilities promptly
-
-## Questions?
-
-If you have questions about the security scanning process or need help addressing findings, please reach out to the repository maintainers.
-
 ---
 
 **Stay secure! 🛡️**
